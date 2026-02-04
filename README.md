@@ -1,1 +1,1 @@
-# attendance-managament-backend
+# attendance-management-backend
