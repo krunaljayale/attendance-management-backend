@@ -1,0 +1,11 @@
+{
+  "name": "attendance-backend",
+  "version": "1.0.0",
+  "description": "This is the server of Attendance Management System.",
+  "main": "app.js",
+  "scripts": {
+    "test": "node app.js"
+  },
+  "author": "Krunal-Jayale (SHASAK)",
+  "license": "ISC"
+}
