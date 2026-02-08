@@ -64,7 +64,7 @@ const studentSchema = new mongoose.Schema(
         pincode: String,
       },
     },
-    role: {
+    course: {
       type: String,
       required: true,
     },

@@ -1,7 +1,10 @@
 const Admin = require("../models/admin");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const mongoose = require("mongoose");
+const { Attendance } = require("../models/attendance");
 const Student = require("../models/student");
+const Holiday = require("../models/holiday");
 
 module.exports.rootRoute = async (req, res) => {
   res.send("Hello Admin");
@@ -69,6 +72,36 @@ module.exports.editProfile = async (req, res) => {
     res.status(200).json(admin);
   } catch (error) {
     console.error("Edit Profile Error:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+module.exports.changePassword = async (req, res) => {
+  try {
+    const { userId, oldPassword, newPassword } = req.body;
+
+    if (!userId || !oldPassword || !newPassword) {
+      return res.status(400).json({ message: "All fields are required." });
+    }
+
+    const admin = await Admin.findById(userId);
+    if (!admin) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    const isMatch = await bcrypt.compare(oldPassword, admin.password);
+    if (!isMatch) {
+      return res.status(401).json({ message: "Old password is incorrect." });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    admin.password = hashedPassword;
+    await admin.save();
+
+    res.status(200).json({ message: "Password changed successfully." });
+  } catch (error) {
+    console.error("Change Password Error:", error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 };
@@ -246,17 +279,93 @@ module.exports.deleteAdmin = async (req, res) => {
   }
 };
 
+module.exports.getHolidays = async (req, res) => {
+  try {
+    const holidays = await Holiday.find();
+    res.status(200).json(holidays);
+  } catch (error) {
+    console.error("Get Holidays Error:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+module.exports.addHoliday = async (req, res) => {
+  try {
+    const holiday = await Holiday.create(req.body);
+    res.status(200).json(holiday);
+  } catch (error) {
+    console.error("Add Holiday Error:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+module.exports.deleteHoliday = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const holiday = await Holiday.findById(id);
+
+    if (!holiday) {
+      return res.status(404).json({ message: "Holiday not found." });
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (new Date(holiday.date) < today) {
+      return res
+        .status(400)
+        .json({ message: "Cannot delete a holiday that has already passed." });
+    }
+
+    await Holiday.findByIdAndDelete(id);
+    res.status(200).json(holiday);
+  } catch (error) {
+    console.error("Delete Holiday Error:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
 module.exports.getStats = async (req, res) => {
   try {
+    const todayStr = new Date().toLocaleDateString("en-CA", {
+      timeZone: "Asia/Kolkata",
+    });
+
+    const attendanceDoc = await Attendance.findById(todayStr);
+
+    let statsData = {
+      total: 0,
+      present: 0,
+      absent: 0,
+      leave: 0,
+    };
+
+    if (attendanceDoc) {
+      statsData.total = attendanceDoc.summary.totalStudents;
+      statsData.present = attendanceDoc.summary.presentCount;
+      statsData.absent = attendanceDoc.summary.absentCount;
+      statsData.leave = attendanceDoc.summary.leaveCount;
+    } else {
+      try {
+        const Student = mongoose.models.Student || mongoose.model("Student");
+        if (Student) {
+          statsData.total = await Student.countDocuments();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
     const stats = [
-      { title: "Total Students", value: 100 },
-      { title: "Total Present", value: 80 },
-      { title: "Total Absent", value: 15 },
-      { title: "Total Leave", value: 5 },
+      { title: "Total Students", value: statsData.total },
+      { title: "Total Present", value: statsData.present },
+      { title: "Total Absent", value: statsData.absent },
+      { title: "Total Leave", value: statsData.leave },
     ];
+
     res.status(200).json(stats);
   } catch (error) {
-    console.error("Get Stats Error:", error);
+    console.error(error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 };
@@ -264,45 +373,94 @@ module.exports.getStats = async (req, res) => {
 module.exports.getAttendanceStats = async (req, res) => {
   try {
     const { viewMode } = req.params;
+
     if (viewMode === "monthly") {
-      const stats = [
-        { label: "Jan", value: 87 },
-        { label: "Feb", value: 78 },
-        { label: "Mar", value: 65 },
-        { label: "Apr", value: 55 },
-        { label: "May", value: 50 },
-        { label: "Jun", value: 45 },
-        { label: "Jul", value: 40 },
-        { label: "Aug", value: 35 },
-        { label: "Sep", value: 30 },
-        { label: "Oct", value: 25 },
-        { label: "Nov", value: 20 },
-        { label: "Dec", value: 15 },
+      const currentYear = new Date().getFullYear();
+
+      const aggregation = await Attendance.aggregate([
+        {
+          $match: {
+            date: {
+              $gte: new Date(`${currentYear}-01-01`),
+              $lte: new Date(`${currentYear}-12-31`),
+            },
+          },
+        },
+        {
+          $group: {
+            _id: { $month: "$date" },
+            average: { $avg: "$summary.attendancePercentage" },
+          },
+        },
+      ]);
+
+      const monthNames = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
       ];
+      const stats = monthNames.map((label, index) => {
+        const found = aggregation.find((item) => item._id === index + 1);
+        return {
+          label,
+          value: found ? Math.round(found.average) : 0,
+        };
+      });
+
       return res.status(200).json(stats);
     } else if (viewMode === "yearly") {
-      const stats = [
-        { label: "2020", value: 1 },
-        { label: "2021", value: 78 },
-        { label: "2022", value: 65 },
-        { label: "2023", value: 55 },
-        { label: "2024", value: 50 },
-        { label: "2025", value: 45 },
-      ];
+      const aggregation = await Attendance.aggregate([
+        {
+          $group: {
+            _id: { $year: "$date" },
+            average: { $avg: "$summary.attendancePercentage" },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]);
+
+      const stats = aggregation.map((item) => ({
+        label: item._id.toString(),
+        value: Math.round(item.average),
+      }));
+
       return res.status(200).json(stats);
     }
+
+    return res.status(400).json({ message: "Invalid view mode" });
   } catch (error) {
-    console.error("Get Stats Error:", error);
+    console.error(error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 };
 
 module.exports.getGenderStats = async (req, res) => {
   try {
-    const stats = [
-      { label: "Male", value: 62 },
-      { label: "Female", value: 38 },
-    ];
+    const stats = await Student.aggregate([
+      {
+        $group: {
+          _id: "$personalInfo.gender",
+          value: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          label: "$_id",
+          value: 1,
+          _id: 0,
+        },
+      },
+    ]);
+
     res.status(200).json(stats);
   } catch (error) {
     console.error("Get Stats Error:", error);
@@ -312,50 +470,73 @@ module.exports.getGenderStats = async (req, res) => {
 
 module.exports.getTopAttendants = async (req, res) => {
   try {
-    const attendants = [
-      {
-        id: "1",
-        name: "Jacob Zachary",
-        avatar:
-          "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&auto=format&fit=crop&q=60",
-        percentage: 98,
-        days: 28,
-      },
-      {
-        id: "2",
-        name: "Hannah Sarah",
-        avatar:
-          "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&auto=format&fit=crop&q=60",
-        percentage: 95,
-        days: 27,
-      },
-      {
-        id: "3",
-        name: "Megan Alyssa",
-        avatar:
-          "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=100&auto=format&fit=crop&q=60",
-        percentage: 92,
-        days: 26,
-      },
-      {
-        id: "4",
-        name: "Lauren Rachel",
-        avatar:
-          "https://images.unsplash.com/photo-1599566150163-29194dcaad36?w=100&auto=format&fit=crop&q=60",
-        percentage: 89,
-        days: 25,
-      },
-      {
-        id: "5",
-        name: "Abby Victoria",
-        avatar:
-          "https://images.unsplash.com/photo-1527980965255-d3b416303d12?w=100&auto=format&fit=crop&q=60",
-        percentage: 85,
-        days: 24,
-      },
-    ];
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(
+      now.getFullYear(),
+      now.getMonth() + 1,
+      0,
+      23,
+      59,
+      59,
+    );
 
-    res.status(200).json(attendants);
+    const totalSchoolDays = await Attendance.countDocuments({
+      date: { $gte: startOfMonth, $lte: endOfMonth },
+    });
+
+    if (totalSchoolDays === 0) {
+      return res.status(200).json([]);
+    }
+
+    const topStudents = await Attendance.aggregate([
+      {
+        $match: {
+          date: { $gte: startOfMonth, $lte: endOfMonth },
+        },
+      },
+      { $unwind: "$records" },
+      {
+        $match: {
+          "records.status": "present",
+        },
+      },
+      {
+        $group: {
+          _id: "$records.studentId",
+          name: { $first: "$records.name" },
+          days: { $sum: 1 },
+        },
+      },
+      { $sort: { days: -1 } },
+      { $limit: 5 },
+      {
+        $lookup: {
+          from: "students",
+          localField: "_id",
+          foreignField: "_id",
+          as: "studentInfo",
+        },
+      },
+      {
+        $project: {
+          id: "$_id",
+          name: 1,
+          days: 1,
+          avatar: { $arrayElemAt: ["$studentInfo.image", 0] },
+        },
+      },
+    ]);
+
+    const formattedResult = topStudents.map((student) => ({
+      id: student.id,
+      name: student.name,
+      avatar: student.avatar || "",
+      days: student.days,
+      percentage: Math.round((student.days / totalSchoolDays) * 100),
+    }));
+
+    res.status(200).json(formattedResult);
   } catch (error) {
     console.error("Get Top Attendants Error:", error);
     res.status(500).json({ message: "Internal Server Error" });
@@ -366,31 +547,59 @@ module.exports.getWeeklyAttendance = async (req, res) => {
   try {
     const { viewMode } = req.params;
 
-    let weeklyStats = [];
+    const curr = new Date();
+    const first = curr.getDate() - curr.getDay() + 1; 
+    const last = first + 6;
 
-    if (viewMode === "present") {
-      weeklyStats = [
-        { day: "Mon", value: 85 },
-        { day: "Tue", value: 78 },
-        { day: "Wed", value: 92 },
-        { day: "Thu", value: 88 },
-        { day: "Fri", value: 75 },
-        { day: "Sat", value: 82 },
-      ];
-    } else {
-      weeklyStats = [
-        { day: "Mon", value: 15 },
-        { day: "Tue", value: 22 },
-        { day: "Wed", value: 8 },
-        { day: "Thu", value: 12 },
-        { day: "Fri", value: 25 },
-        { day: "Sat", value: 18 },
-      ];
-    }
+    const startOfWeek = new Date(curr.setDate(first));
+    startOfWeek.setHours(0, 0, 0, 0);
+
+    const endOfWeek = new Date(curr.setDate(last));
+    endOfWeek.setHours(23, 59, 59, 999);
+
+    const attendanceRecords = await Attendance.find({
+      date: { $gte: startOfWeek, $lte: endOfWeek },
+    }).select("date summary");
+
+    const daysMap = {
+      1: "Mon",
+      2: "Tue",
+      3: "Wed",
+      4: "Thu",
+      5: "Fri",
+      6: "Sat",
+    };
+
+    const weeklyStats = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(
+      (day) => ({
+        day,
+        value: 0,
+      })
+    );
+
+    attendanceRecords.forEach((record) => {
+      const dayIndex = new Date(record.date).getDay();
+      const dayName = daysMap[dayIndex];
+
+      if (dayName) {
+        const statsItem = weeklyStats.find((item) => item.day === dayName);
+        if (statsItem) {
+          const total = record.summary.totalStudents || 1; 
+
+          if (viewMode === "present") {
+            statsItem.value = record.summary.attendancePercentage;
+          } else {
+            // Calculate Absent Percentage: (Absent / Total) * 100
+            const absentPct = (record.summary.absentCount / total) * 100;
+            statsItem.value = parseFloat(absentPct.toFixed(2));
+          }
+        }
+      }
+    });
 
     res.status(200).json(weeklyStats);
   } catch (error) {
-    console.error("Get Weekly Stats Error:", error);
+    console.error(error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 };
@@ -497,6 +706,99 @@ module.exports.deleteStudent = async (req, res) => {
     res.status(200).json(student);
   } catch (error) {
     console.error("Delete Student Error:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+module.exports.markAttendance = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const { date, attendantId, records } = req.body;
+
+    if (!records || records.length === 0) {
+      await session.abortTransaction();
+      session.endSession();
+      return res
+        .status(400)
+        .json({ message: "No attendance records provided" });
+    }
+
+    const customId = date;
+
+    const existingAttendance =
+      await Attendance.findById(customId).session(session);
+
+    if (existingAttendance) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(409).json({
+        success: false,
+        message: "Attendance for this date has already been marked.",
+      });
+    }
+
+    const totalStudents = records.length;
+    const presentCount = records.filter((r) => r.status === "present").length;
+    const absentCount = records.filter((r) => r.status === "absent").length;
+    const leaveCount = records.filter((r) => r.status === "leave").length;
+
+    const attendancePercentage =
+      totalStudents > 0 ? ((presentCount / totalStudents) * 100).toFixed(2) : 0;
+
+    const newAttendance = new Attendance({
+      _id: customId,
+      date: new Date(date),
+      attendant: attendantId,
+      records: records,
+      summary: {
+        totalStudents,
+        presentCount,
+        absentCount,
+        leaveCount,
+        attendancePercentage,
+      },
+    });
+
+    const savedAttendance = await newAttendance.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.status(200).json({
+      success: true,
+      message: "Attendance marked successfully",
+      data: savedAttendance,
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+      error: error.message,
+    });
+  }
+};
+
+module.exports.getAttendance = async (req, res) => {
+  try {
+    const { date } = req.params;
+    const attendance = await Attendance.findById(date).populate(
+      "attendant",
+      "name email",
+    );
+
+    if (!attendance) {
+      return res.status(200).json(null);
+    }
+
+    res.status(200).json(attendance);
+  } catch (error) {
+    console.error("Get Attendance Error:", error);
     res.status(500).json({ message: "Internal Server Error" });
   }
 };
