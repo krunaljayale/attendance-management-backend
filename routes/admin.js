@@ -24,6 +24,7 @@ const {
   deleteHoliday,
   markAttendance,
   getAttendance,
+  generateCertificate,
 } = require("../controllers/admin");
 const { protect, restrictTo } = require("../utils/AuthMiddleware");
 const router = express.Router();
@@ -53,5 +54,6 @@ router.post("/register-new-student", registerNewStudent);
 router.delete("/delete-student/:id",restrictTo("SUPER_ADMIN"), deleteStudent);
 router.post("/mark-attendance",markAttendance);
 router.get("/get-attendance/:date",getAttendance);
+router.get("/generate-certificate/:id",generateCertificate);
 
 module.exports = router;

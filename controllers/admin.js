@@ -5,6 +5,17 @@ const mongoose = require("mongoose");
 const { Attendance } = require("../models/attendance");
 const Student = require("../models/student");
 const Holiday = require("../models/holiday");
+const puppeteer = require("puppeteer");
+const fs = require("fs-extra");
+const hbs = require("hbs");
+const path = require("path");
+
+// Helper to compile the HTML template
+const compile = async (templateName, data) => {
+  const filePath = path.join(process.cwd(), "templates", `${templateName}.hbs`);
+  const html = await fs.readFile(filePath, "utf-8");
+  return hbs.compile(html)(data);
+};
 
 module.exports.rootRoute = async (req, res) => {
   res.send("Hello Admin");
@@ -548,7 +559,7 @@ module.exports.getWeeklyAttendance = async (req, res) => {
     const { viewMode } = req.params;
 
     const curr = new Date();
-    const first = curr.getDate() - curr.getDay() + 1; 
+    const first = curr.getDate() - curr.getDay() + 1;
     const last = first + 6;
 
     const startOfWeek = new Date(curr.setDate(first));
@@ -574,7 +585,7 @@ module.exports.getWeeklyAttendance = async (req, res) => {
       (day) => ({
         day,
         value: 0,
-      })
+      }),
     );
 
     attendanceRecords.forEach((record) => {
@@ -584,12 +595,11 @@ module.exports.getWeeklyAttendance = async (req, res) => {
       if (dayName) {
         const statsItem = weeklyStats.find((item) => item.day === dayName);
         if (statsItem) {
-          const total = record.summary.totalStudents || 1; 
+          const total = record.summary.totalStudents || 1;
 
           if (viewMode === "present") {
             statsItem.value = record.summary.attendancePercentage;
           } else {
-            // Calculate Absent Percentage: (Absent / Total) * 100
             const absentPct = (record.summary.absentCount / total) * 100;
             statsItem.value = parseFloat(absentPct.toFixed(2));
           }
@@ -800,5 +810,92 @@ module.exports.getAttendance = async (req, res) => {
   } catch (error) {
     console.error("Get Attendance Error:", error);
     res.status(500).json({ message: "Internal Server Error" });
+  }
+};
+
+module.exports.generateCertificate = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Fetch Student
+    const student = await Student.findById(id);
+    if (!student) {
+      return res.status(404).json({ message: "Student not found" });
+    }
+
+    // 2. STRICT VALIDATION: Check for Important Fields
+    const missingFields = [];
+
+    if (!student.name) missingFields.push("Name");
+    if (!student.personalInfo?.aadharCard) missingFields.push("Aadhar Card");
+    if (!student.course) missingFields.push("Course Name");
+    if (!student.courseStartDate) missingFields.push("Course Start Date");
+    if (!student.courseEndDate) missingFields.push("Course End Date");
+
+    // Check if marks are explicitly null or undefined (since 0 is a valid mark)
+    if (student.marks === undefined || student.marks === null)
+      missingFields.push("Marks");
+    if (!student.grade) missingFields.push("Grade");
+    if (!student.attendance) missingFields.push("Attendance");
+
+    // If any fields are missing, stop and alert the frontend
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        message: `Cannot generate certificate. Missing fields: ${missingFields.join(", ")}`,
+      });
+    }
+
+    // 3. Generate Certificate ID & Update Student Status
+    // Format: CERT-YEAR-ROLLID (e.g., CERT-2024-101)
+    const certificateId = `CERT-${new Date().getFullYear()}-${student.rollId}`;
+
+    student.certificateId = certificateId;
+    student.status = "Completed"; // ✅ Auto-update status to Completed
+
+    await student.save(); // Save changes to DB
+
+    // 4. Prepare Data for Template
+    const data = {
+      name: student.name,
+      course: student.course,
+      grade: student.grade,
+      certificateId: certificateId,
+      startDate: new Date(student.courseStartDate).toLocaleDateString("en-IN"),
+      endDate: new Date(student.courseEndDate).toLocaleDateString("en-IN"),
+      date: new Date().toLocaleDateString("en-IN"),
+    };
+
+    // 5. Generate PDF
+    const content = await compile("certificate", data);
+
+    const browser = await puppeteer.launch({
+      headless: "new",
+      args: ["--no-sandbox"],
+    });
+
+    const page = await browser.newPage();
+    await page.setContent(content);
+
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      landscape: true,
+      printBackground: true,
+    });
+
+    await browser.close();
+
+    // 6. Send Response
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename=Certificate-${student.name}.pdf`,
+      "Content-Length": pdfBuffer.length,
+    });
+
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error("Generate Certificate Error:", error);
+    res
+      .status(500)
+      .json({ message: "Internal Server Error", error: error.message });
   }
 };
